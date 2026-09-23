@@ -1,4 +1,4 @@
-# PlantIQ Backend Walkthrough: Tasks S1-AI-02, S1-AI-03, S1-AI-04, and S1-AI-05
+# PlantIQ Backend Walkthrough: Tasks S1-AI-02 through S2-AI-01
 
 This document summarizes all engineering tasks, architectural decisions, code changes, and verification runs performed across the PlantIQ monorepo backend to date.
 
@@ -33,9 +33,16 @@ flowchart TD
         L3 --> L4["100 Pytest Tests & Mypy Strict\nZero Network Calls in CI"]
     end
 
+    subgraph S2_AI_01["Task S2-AI-01: File Profiler (Polars & DuckDB)"]
+        P1["Async & Sync Profiler Engine\n(/backend/app/ai/file_profiler.py)"] --> P2["Timestamp & Cadence Detector\n(ISO & Day-First -> 900s / 15m)"]
+        P2 --> P3["Column Stats & 50-pt Sparklines\n(Vectorized Polars Bucketing)"]
+        P3 --> P4["115 Pytest Tests & Mypy Strict\n(CSV, Parquet, Excel Supported)"]
+    end
+
     S1_AI_02 --> S1_AI_03
     S1_AI_03 --> S1_AI_04
     S1_AI_04 --> S1_AI_05
+    S1_AI_05 --> S2_AI_01
 ```
 
 ---
@@ -176,57 +183,79 @@ Implement an enterprise-grade LLM provider abstraction layer at `/backend/app/ll
 
 ---
 
-## 5. Verification and Quality Assurance Results
+## 5. Task S2-AI-01: File Profiler using Polars & DuckDB
+
+### Objective
+Implement an asynchronous, high-performance file profiling module and CLI utility at `/backend/app/ai/file_profiler.py` using **Polars** and **DuckDB** (strictly zero Pandas) that automatically extracts schemas, detects timestamp columns across heterogeneous formats, determines sensor sampling intervals (cadence), generates column descriptive statistics, and produces downsampled sparklines for UI visualization.
+
+### Key Architectural Implementations
+
+1. **Multi-Format Ingestion Engine (`backend/app/ai/file_profiler.py`):**
+   - High-throughput readers supporting `.csv`, `.parquet`, `.pq`, `.xlsx`, `.xls` via Polars and `fastexcel`.
+   - Leverages `infer_schema_length=10000` to smoothly handle daytime/nighttime transitions where solar sensors shift from integer `0` to floating-point readings.
+   - DuckDB fallback reader (`read_csv_auto`) handles anomalous delimiters and malformed records.
+2. **Empirical Timestamp & Cadence Detection:**
+   - Heuristic candidate ranking and multi-pattern parser testing against ISO-8601 (`%Y-%m-%d %H:%M:%S`), day-first formats (`%d-%m-%Y %H:%M`), month-first, date-only, and epoch timestamps.
+   - Computes unique sorted timestamp deltas:
+     - Correctly detects **`Day-First Hyphen Minutes`** on `Plant_1_Generation_Data.csv` (68,778 rows).
+     - Correctly detects **`ISO-8601 Seconds`** on `Plant_1_Weather_Sensor_Data.csv` and `Plant_2_Generation_Data.csv`.
+     - Detects exact **900.0s (15m)** median sampling interval with `is_regular_cadence: True`.
+3. **Vectorized Column Statistics & Downsampled Sparklines:**
+   - Computes null counts, null percentages, distinct counts, min, max, mean, median, and standard deviation using vectorized Polars aggregations.
+   - Bucket-downsamples numeric columns into $N$ representative points (default 50 points) using `pl.int_range` chunking, imputing nulls with series medians to generate clean, frontend-ready JSON sparkline arrays.
+4. **Resilience & Custom Exceptions:**
+   - Typed exceptions: `ProfilerError`, `EmptyFileError` (0-byte files or header-only data), `UnsupportedFileFormatError`, `TimestampDetectionError`.
+5. **Async & Sync Dual Interfaces:**
+   - `async def profile_file(...)`: Non-blocking async API offloading file I/O and Polars compute to background worker threads via `asyncio.to_thread`.
+   - `class FileProfiler`: Synchronous profiling engine with CLI invocation support.
+6. **Rich Interactive CLI Utility:**
+   - Runnable via `python -m backend.app.ai.file_profiler <path>` or standalone execution, rendering styled summary panels, timestamp ranges, and column statistical tables.
+
+---
+
+## 6. Verification and Quality Assurance Results
 
 ### Complete Test Suite Execution (`pytest`)
-All **100** unit, integration, and provider tests execute and pass cleanly with **zero network calls in CI**:
+All **115** unit, integration, and AI profiler tests execute and pass cleanly with **zero network calls in CI**:
 
 ```bash
 PYTHONPATH=. .venv/bin/pytest -v backend/tests/
 ```
 
 ```
+backend/tests/ai/test_file_profiler.py:               15 passed (0.90s)
 backend/tests/core/test_units.py:                     75 passed (0.39s)
 backend/tests/llm/test_providers.py:                  15 passed (0.27s)
 backend/tests/scripts/test_seed_surya.py:              3 passed (1.19s)
 backend/tests/scripts/test_smoke_tooluse.py:           7 passed (0.22s)
-============================= 100 passed in 1.86s ==============================
+============================= 115 passed in 2.87s ==============================
 ```
 
 ### Static Type Checking (`mypy --strict`)
 All backend source files pass strict static type analysis with zero errors:
 
 ```bash
-.venv/bin/mypy --strict \
-  backend/app/models/base.py \
-  backend/app/models/entities.py \
-  backend/app/db/session.py \
-  backend/app/core/units.py \
-  backend/app/llm/ \
-  backend/scripts/seed_surya.py \
-  backend/scripts/smoke_tooluse.py \
-  backend/tests/core/test_units.py \
-  backend/tests/llm/test_providers.py \
-  backend/tests/scripts/test_seed_surya.py \
-  backend/tests/scripts/test_smoke_tooluse.py
+.venv/bin/mypy --strict backend/app/ backend/scripts/ backend/tests/
 ```
 
 ```
-Success: no issues found in 11 source files
+Success: no issues found in 28 source files
 ```
 
 ### CLI Execution Verification
 ```bash
-# Surya-A Seed Run
-PYTHONPATH=. .venv/bin/python backend/scripts/seed_surya.py
+# 1. Profile Plant 1 Generation Data (Day-First Format)
+.venv/bin/python backend/app/ai/file_profiler.py Datasets/Plant_1_Generation_Data.csv
+# Result: 68,778 rows in 72.6 ms | Day-First Hyphen Minutes | 900.0s (15m) | Regular: Yes
 
-# Tool-Use Reliability Smoke Test (Anthropic Mock)
-.venv/bin/python backend/scripts/smoke_tooluse.py --mock --provider anthropic --stream
+# 2. Profile Plant 1 Weather Sensor Data (ISO Format)
+.venv/bin/python backend/app/ai/file_profiler.py Datasets/Plant_1_Weather_Sensor_Data.csv
+# Result: 3,182 rows in 24.2 ms | ISO-8601 Seconds | 900.0s (15m) | Regular: Yes
 
-# Tool-Use Reliability Smoke Test (OpenAI-compatible / vLLM Mock)
-.venv/bin/python backend/scripts/smoke_tooluse.py --mock --provider openai_compatible --stream
+# 3. Profile Plant 2 Generation Data (ISO Format)
+.venv/bin/python backend/app/ai/file_profiler.py Datasets/Plant_2_Generation_Data.csv
+# Result: 67,698 rows in 61.8 ms | ISO-8601 Seconds | 900.0s (15m) | Regular: Yes
 ```
-*Output confirmed: Both providers successfully parse tool schemas, yield streaming deltas, and validate response invariants.*
 
 ---
 
@@ -252,7 +281,11 @@ PYTHONPATH=. .venv/bin/python backend/scripts/seed_surya.py
 | [`backend/app/llm/factory.py`](file:///home/stpl/Desktop/plantiq/backend/app/llm/factory.py) | Provider factory adhering to strict environment-only configuration (NFR-5). |
 | [`backend/scripts/smoke_tooluse.py`](file:///home/stpl/Desktop/plantiq/backend/scripts/smoke_tooluse.py) | Tool-use verification CLI with live network and mock CI testing modes. |
 | [`docs/llm-provider-notes.md`](file:///home/stpl/Desktop/plantiq/docs/llm-provider-notes.md) | Operational notes, vLLM launch commands, and local model benchmark evaluation. |
+| [`backend/app/ai/file_profiler.py`](file:///home/stpl/Desktop/plantiq/backend/app/ai/file_profiler.py) | High-performance file profiler using Polars & DuckDB with timestamp & cadence detection. |
+| [`backend/app/ai/__init__.py`](file:///home/stpl/Desktop/plantiq/backend/app/ai/__init__.py) | Package initialization exporting file profiler API and typed exceptions. |
 | [`backend/tests/core/test_units.py`](file:///home/stpl/Desktop/plantiq/backend/tests/core/test_units.py) | 75 unit tests for unit conversion, alias normalization, and error handling. |
 | [`backend/tests/llm/test_providers.py`](file:///home/stpl/Desktop/plantiq/backend/tests/llm/test_providers.py) | 15 unit tests covering normalization, tool use, streaming, retries, and errors. |
 | [`backend/tests/scripts/test_seed_surya.py`](file:///home/stpl/Desktop/plantiq/backend/tests/scripts/test_seed_surya.py) | 3 integration tests verifying Surya-A tree structure, idempotency, and reset. |
 | [`backend/tests/scripts/test_smoke_tooluse.py`](file:///home/stpl/Desktop/plantiq/backend/tests/scripts/test_smoke_tooluse.py) | 7 unit tests for tool-use smoke test CLI in mock and streaming modes. |
+| [`backend/tests/ai/test_file_profiler.py`](file:///home/stpl/Desktop/plantiq/backend/tests/ai/test_file_profiler.py) | 15 unit tests covering CSV, Parquet, Excel, timestamp detection, and sparklines. |
+
