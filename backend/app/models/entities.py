@@ -167,3 +167,30 @@ class Channel(Base, TimestampMixin):
     canonical_signal: Mapped[CanonicalSignal] = relationship(
         "CanonicalSignal", back_populates="channels"
     )
+    observations: Mapped[List[Observation]] = relationship(
+        "Observation", back_populates="channel", cascade="all, delete-orphan"
+    )
+
+
+class Observation(Base, TimestampMixin):
+    """Time-series telemetry observation record mapped to a Channel."""
+
+    __tablename__ = "observations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    channel_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("channels.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    value: Mapped[float] = mapped_column(Float, nullable=False)
+    raw_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    qc_flag: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    metadata_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("channel_id", "timestamp", name="uq_observation_channel_timestamp"),
+    )
+
+    channel: Mapped[Channel] = relationship("Channel", back_populates="observations")
