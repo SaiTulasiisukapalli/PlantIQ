@@ -19,6 +19,22 @@ from backend.app.ai.ingest_worker import (
     QCFlag,
     evaluate_qc_series,
 )
+from backend.app.ai.job_history import (
+    JobHistory,
+    JobRunContext,
+    build_qc_summary,
+    create_job_record,
+    create_job_record_async,
+    get_job_record,
+    get_job_record_async,
+    list_job_records,
+    list_job_records_async,
+    record_job_failure,
+    record_job_failure_async,
+    record_job_qc_summary,
+    record_job_qc_summary_async,
+    track_pipeline_job,
+)
 from backend.app.ai.mapping_suggester import (
     CANONICAL_SIGNALS,
     BatchMappingResult,
@@ -50,5 +66,19 @@ __all__ = [
     "IngestResult",
     "ChannelMappingConfig",
     "evaluate_qc_series",
+    "JobHistory",
+    "JobRunContext",
+    "build_qc_summary",
+    "create_job_record",
+    "create_job_record_async",
+    "record_job_qc_summary",
+    "record_job_qc_summary_async",
+    "record_job_failure",
+    "record_job_failure_async",
+    "get_job_record",
+    "get_job_record_async",
+    "list_job_records",
+    "list_job_records_async",
+    "track_pipeline_job",
 ]
 

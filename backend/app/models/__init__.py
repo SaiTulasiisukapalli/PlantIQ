@@ -5,6 +5,7 @@ from backend.app.models.entities import (
     Asset,
     CanonicalSignal,
     Channel,
+    JobHistory,
     Observation,
     Organization,
     Plant,
@@ -22,4 +23,5 @@ __all__ = [
     "CanonicalSignal",
     "Channel",
     "Observation",
+    "JobHistory",
 ]

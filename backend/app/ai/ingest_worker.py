@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from enum import IntFlag
 from pathlib import Path
 import sys
+import threading
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import polars as pl
@@ -248,6 +249,8 @@ class IngestWorker:
         init_db(self.engine)
         # In-memory channel registry cache: (asset_id, canonical_key) -> channel_id
         self._channel_cache: Dict[Tuple[str, str], str] = {}
+        self._sqlite_lock = threading.Lock()
+        self._channel_lock = threading.Lock()
         self._refresh_channel_cache()
 
     def _refresh_channel_cache(self) -> None:
@@ -277,35 +280,39 @@ class IngestWorker:
         if cache_key in self._channel_cache:
             return self._channel_cache[cache_key]
 
-        with self.session_factory() as session:
-            # Check existing in DB
-            existing = (
-                session.query(Channel)
-                .filter(
-                    Channel.asset_id == asset_id,
-                    Channel.canonical_signal_key == canonical_key,
-                )
-                .first()
-            )
-            if existing:
-                self._channel_cache[cache_key] = existing.id
-                return existing.id
+        with self._channel_lock:
+            if cache_key in self._channel_cache:
+                return self._channel_cache[cache_key]
 
-            # Create new channel
-            new_id = generate_uuid()
-            new_channel = Channel(
-                id=new_id,
-                asset_id=asset_id,
-                canonical_signal_key=canonical_key,
-                source_name=source_name,
-                source_unit=source_unit,
-                interval_s=interval_s,
-                aggregation_method=aggregation_method,
-            )
-            session.add(new_channel)
-            session.commit()
-            self._channel_cache[cache_key] = new_id
-            return new_id
+            with self.session_factory() as session:
+                # Check existing in DB
+                existing = (
+                    session.query(Channel)
+                    .filter(
+                        Channel.asset_id == asset_id,
+                        Channel.canonical_signal_key == canonical_key,
+                    )
+                    .first()
+                )
+                if existing:
+                    self._channel_cache[cache_key] = existing.id
+                    return existing.id
+
+                # Create new channel
+                new_id = generate_uuid()
+                new_channel = Channel(
+                    id=new_id,
+                    asset_id=asset_id,
+                    canonical_signal_key=canonical_key,
+                    source_name=source_name,
+                    source_unit=source_unit,
+                    interval_s=interval_s,
+                    aggregation_method=aggregation_method,
+                )
+                session.add(new_channel)
+                session.commit()
+                self._channel_cache[cache_key] = new_id
+                return new_id
 
     # -----------------------------------------------------------------------
     # Ingestion Core Pipeline
@@ -510,35 +517,45 @@ class IngestWorker:
             """
 
         written_count = 0
-        with self.engine.begin() as conn:
-            if dialect_name == "sqlite":
-                conn.execute(text("PRAGMA synchronous = OFF;"))
-                conn.execute(text("PRAGMA journal_mode = MEMORY;"))
 
-            cursor = getattr(conn.connection, "cursor", None)
-            if cursor is not None:
-                db_cursor = cursor()
-                for offset in range(0, total_rows, chunk_size):
-                    chunk_slice = formatted_df.slice(offset, chunk_size)
-                    db_cursor.executemany(raw_sql, chunk_slice.iter_rows())
-                    written_count += len(chunk_slice)
-            else:
-                sa_sql = text("""
-                    INSERT INTO observations (id, channel_id, timestamp, value, raw_value, qc_flag, created_at, updated_at)
-                    VALUES (:id, :channel_id, :timestamp, :value, :raw_value, :qc_flag, :created_at, :updated_at)
-                    ON CONFLICT (channel_id, timestamp) DO UPDATE SET
-                        value = excluded.value,
-                        raw_value = excluded.raw_value,
-                        qc_flag = excluded.qc_flag,
-                        updated_at = excluded.updated_at
-                """)
-                for offset in range(0, total_rows, chunk_size):
-                    chunk_slice = formatted_df.slice(offset, chunk_size)
-                    records = chunk_slice.to_dicts()
-                    conn.execute(sa_sql, records)
-                    written_count += len(records)
+        def _execute_write() -> int:
+            nonlocal written_count
+            with self.engine.begin() as conn:
+                if dialect_name == "sqlite":
+                    try:
+                        conn.execute(text("PRAGMA synchronous = OFF;"))
+                        conn.execute(text("PRAGMA journal_mode = MEMORY;"))
+                    except Exception:
+                        pass
 
-        return written_count
+                cursor = getattr(conn.connection, "cursor", None)
+                if cursor is not None:
+                    db_cursor = cursor()
+                    for offset in range(0, total_rows, chunk_size):
+                        chunk_slice = formatted_df.slice(offset, chunk_size)
+                        db_cursor.executemany(raw_sql, chunk_slice.iter_rows())
+                        written_count += len(chunk_slice)
+                else:
+                    sa_sql = text("""
+                        INSERT INTO observations (id, channel_id, timestamp, value, raw_value, qc_flag, created_at, updated_at)
+                        VALUES (:id, :channel_id, :timestamp, :value, :raw_value, :qc_flag, :created_at, :updated_at)
+                        ON CONFLICT (channel_id, timestamp) DO UPDATE SET
+                            value = excluded.value,
+                            raw_value = excluded.raw_value,
+                            qc_flag = excluded.qc_flag,
+                            updated_at = excluded.updated_at
+                    """)
+                    for offset in range(0, total_rows, chunk_size):
+                        chunk_slice = formatted_df.slice(offset, chunk_size)
+                        records = chunk_slice.to_dicts()
+                        conn.execute(sa_sql, records)
+                        written_count += len(records)
+            return written_count
+
+        if dialect_name == "sqlite":
+            with self._sqlite_lock:
+                return _execute_write()
+        return _execute_write()
 
     # -----------------------------------------------------------------------
     # Public Ingestion APIs (Sync & Async)

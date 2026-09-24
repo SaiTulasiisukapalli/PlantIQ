@@ -194,3 +194,26 @@ class Observation(Base, TimestampMixin):
     )
 
     channel: Mapped[Channel] = relationship("Channel", back_populates="observations")
+
+
+class JobHistory(Base, TimestampMixin):
+    """Background job execution history and audit record."""
+
+    __tablename__ = "job_history"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    run_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, default=generate_uuid)
+    job_type: Mapped[str] = mapped_column(String(64), default="pipeline_benchmark", nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False, index=True)
+    dataset_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    dataset_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    total_rows: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_observations: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    duration_ms: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    throughput_rows_per_sec: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    qc_summary: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    metadata_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
