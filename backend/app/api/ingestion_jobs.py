@@ -1,31 +1,40 @@
 from datetime import datetime, timezone
-from pathlib import Path
 from uuid import UUID
 
-import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
 from app.models import (
-    Asset,
-    Channel,
     File,
     IngestionJob,
     MappingTemplate,
-    Reading,
+    User,
 )
 from app.schemas.ingestion_job import (
     IngestionJobCreate,
     IngestionJobResponse,
 )
+from app.services.ingestion import process_ingestion_job
+from app.api.deps import get_current_user, require_role, enforce_org_access
 
 
 router = APIRouter(
     prefix="/ingestion-jobs",
     tags=["Ingestion Jobs"],
 )
+
+
+def run_async_ingestion(job_id_str: str):
+    from app.db.session import create_db_engine, get_session_factory
+    engine = create_db_engine()
+    session_factory = get_session_factory(engine)
+    with session_factory() as session:
+        try:
+            process_ingestion_job(session, UUID(job_id_str))
+        except Exception as exc:
+            print(f"Async ingestion background worker error for job {job_id_str}: {exc}")
 
 
 @router.post(
@@ -36,6 +45,7 @@ router = APIRouter(
 def create_ingestion_job(
     job: IngestionJobCreate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "engineer")),
 ):
     file_record = db.get(File, job.file_id)
 
@@ -44,6 +54,7 @@ def create_ingestion_job(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="File not found",
         )
+    enforce_org_access(current_user, file_record.org_id)
 
     template = db.get(
         MappingTemplate,
@@ -55,6 +66,7 @@ def create_ingestion_job(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Mapping template not found",
         )
+    enforce_org_access(current_user, template.org_id)
 
     if file_record.org_id != template.org_id:
         raise HTTPException(
@@ -84,8 +96,13 @@ def get_ingestion_jobs(
     file_id: UUID | None = None,
     template_id: UUID | None = None,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    query = select(IngestionJob)
+    query = (
+        select(IngestionJob)
+        .join(File, IngestionJob.file_id == File.id)
+        .where(File.org_id == current_user.org_id)
+    )
 
     if file_id is not None:
         query = query.where(
@@ -113,6 +130,7 @@ def get_ingestion_jobs(
 def get_ingestion_job(
     job_id: UUID,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     job = db.get(
         IngestionJob,
@@ -124,6 +142,8 @@ def get_ingestion_job(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Ingestion job not found",
         )
+
+    enforce_org_access(current_user, job.file.org_id)
 
     return job
 
@@ -134,7 +154,9 @@ def get_ingestion_job(
 )
 def run_ingestion_job(
     job_id: UUID,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "engineer")),
 ):
     job = db.get(
         IngestionJob,
@@ -147,298 +169,29 @@ def run_ingestion_job(
             detail="Ingestion job not found",
         )
 
-    if job.status == "done":
+    enforce_org_access(current_user, job.file.org_id)
+
+    if job.status in ("done", "completed"):
         return job
 
-    file_record = db.get(
-        File,
-        job.file_id,
-    )
-
-    if file_record is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="File not found",
-        )
-
-    template = db.get(
-        MappingTemplate,
-        job.template_id,
-    )
-
-    if template is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Mapping template not found",
-        )
-
-    try:
-        job.status = "profiling"
-        job.started_at = datetime.now(timezone.utc)
-        job.error = None
-        db.commit()
-
-        file_path = Path(file_record.path)
-
-        if not file_path.exists():
-            backend_root = Path(__file__).resolve().parents[2]
-            file_path = backend_root / file_record.path
-
-        if not file_path.exists():
-            raise FileNotFoundError(
-                f"CSV file not found: {file_record.path}"
-            )
-
-        df = pd.read_csv(file_path)
-
-        if df.empty:
-            raise ValueError(
-                "CSV file contains no rows"
-            )
-
-        mappings = template.mappings
-
-        timestamp_column = mappings.get("timestamp")
-        source_key_column = mappings.get("source_key")
-        power_column = mappings.get("power_ac")
-
-        if not timestamp_column:
-            raise ValueError(
-                "Mapping template does not contain a timestamp mapping"
-            )
-
-        if not source_key_column:
-            raise ValueError(
-                "Mapping template does not contain a source_key mapping"
-            )
-
-        if not power_column:
-            raise ValueError(
-                "Mapping template does not contain a power_ac mapping"
-            )
-
-        required_columns = [
-            timestamp_column,
-            source_key_column,
-            power_column,
-        ]
-
-        missing_columns = [
-            column
-            for column in required_columns
-            if column not in df.columns
-        ]
-
-        if missing_columns:
-            raise ValueError(
-                f"Required CSV columns not found: {missing_columns}"
-            )
-
-        job.status = "ingesting"
-        db.commit()
-
-        df[timestamp_column] = pd.to_datetime(
-            df[timestamp_column],
-            dayfirst=True,
-            errors="coerce",
-        )
-
-        df[power_column] = pd.to_numeric(
-            df[power_column],
-            errors="coerce",
-        )
-
-        df[source_key_column] = (
-            df[source_key_column]
-            .astype("string")
-            .str.strip()
-        )
-
-        invalid_timestamp_count = int(
-            df[timestamp_column].isna().sum()
-        )
-
-        invalid_power_count = int(
-            df[power_column].isna().sum()
-        )
-
-        invalid_source_key_count = int(
-            df[source_key_column].isna().sum()
-        )
-
-        valid_df = df[
-            df[timestamp_column].notna()
-            & df[power_column].notna()
-            & df[source_key_column].notna()
-        ].copy()
-
-        if valid_df.empty:
-            raise ValueError(
-                "No valid timestamp/source_key/power rows found in CSV"
-            )
-
-        assets = db.execute(
-            select(Asset).where(
-                Asset.plant_id == (
-                    select(Asset.plant_id)
-                    .where(Asset.metadata_["source_key"].as_string() == valid_df.iloc[0][source_key_column])
-                    .limit(1)
-                    .scalar_subquery()
-                )
-            )
-        ).scalars().all()
-
-        asset_by_source_key = {}
-
-        for asset in assets:
-            metadata = asset.metadata_ or {}
-            source_key = metadata.get("source_key")
-
-            if source_key:
-                asset_by_source_key[source_key] = asset
-
-        if not asset_by_source_key:
-            raise ValueError(
-                "No assets with SOURCE_KEY mappings were found"
-            )
-
-        channels = db.execute(
-            select(Channel).where(
-                Channel.canonical_key == "power_ac",
-                Channel.source_name == "AC Power",
-            )
-        ).scalars().all()
-
-        channel_by_asset_id = {
-            channel.asset_id: channel
-            for channel in channels
-        }
-
-        source_keys = set(
-            valid_df[source_key_column].unique()
-        )
-
-        unknown_source_keys = sorted(
-            source_keys - set(asset_by_source_key.keys())
-        )
-
-        if unknown_source_keys:
-            raise ValueError(
-                "SOURCE_KEY values are not mapped to assets: "
-                + ", ".join(unknown_source_keys)
-            )
-
-        inserted = 0
-        updated = 0
-        skipped = 0
-
-        min_time = None
-        max_time = None
-
-        for row in valid_df.itertuples(index=False):
-            row_dict = row._asdict()
-
-            timestamp = row_dict[timestamp_column]
-            source_key = row_dict[source_key_column]
-            power_ac = row_dict[power_column]
-
-            asset = asset_by_source_key.get(source_key)
-
-            if asset is None:
-                skipped += 1
-                continue
-
-            channel = channel_by_asset_id.get(asset.id)
-
-            if channel is None:
-                skipped += 1
-                continue
-
-            timestamp = timestamp.to_pydatetime()
-
-            if timestamp.tzinfo is None:
-                timestamp = timestamp.replace(
-                    tzinfo=timezone.utc
-                )
-
-            value = float(power_ac)
-
-            existing_reading = db.execute(
-                select(Reading).where(
-                    Reading.channel_id == channel.id,
-                    Reading.ts == timestamp,
-                )
-            ).scalar_one_or_none()
-
-            if existing_reading is not None:
-                existing_reading.value = value
-                existing_reading.quality = 0
-                existing_reading.ingestion_job_id = job.id
-                updated += 1
-            else:
-                reading = Reading(
-                    channel_id=channel.id,
-                    ts=timestamp,
-                    value=value,
-                    quality=0,
-                    ingestion_job_id=job.id,
-                )
-
-                db.add(reading)
-                inserted += 1
-
-            if min_time is None or timestamp < min_time:
-                min_time = timestamp
-
-            if max_time is None or timestamp > max_time:
-                max_time = timestamp
-
-        db.flush()
-
-        job.status = "qc"
-        job.rows_total = len(df)
-        job.time_min = min_time
-        job.time_max = max_time
-
-        job.qc_summary = {
-            "rows_total": int(len(df)),
-            "rows_valid": int(len(valid_df)),
-            "rows_inserted": inserted,
-            "rows_updated": updated,
-            "rows_skipped": skipped,
-            "invalid_timestamp": invalid_timestamp_count,
-            "invalid_power_ac": invalid_power_count,
-            "invalid_source_key": invalid_source_key_count,
-            "unique_source_keys": len(source_keys),
-            "unknown_source_keys": unknown_source_keys,
-        }
-
-        job.status = "done"
-        job.finished_at = datetime.now(timezone.utc)
-        job.error = None
-
-        db.commit()
-        db.refresh(job)
-
+    if job.status in ("ingesting", "processing"):
         return job
 
-    except Exception as exc:
-        db.rollback()
+    job.status = "ingesting"
+    job.started_at = datetime.now(timezone.utc)
+    job.error = None
+    job.qc_summary = {
+        "progress": 0.0,
+        "rows_processed": 0,
+        "rows_total": job.rows_total or 0,
+        "readings_inserted": 0,
+        "assets_created": 0,
+        "channels_created": 0,
+    }
+    db.commit()
+    db.refresh(job)
 
-        job = db.get(
-            IngestionJob,
-            job_id,
-        )
+    background_tasks.add_task(run_async_ingestion, str(job_id))
 
-        if job is not None:
-            job.status = "failed"
-            job.error = str(exc)
-            job.finished_at = datetime.now(timezone.utc)
+    return job
 
-            db.commit()
-            db.refresh(job)
-
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Ingestion failed: {exc}",
-        )

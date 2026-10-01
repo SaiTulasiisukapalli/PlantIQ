@@ -5,8 +5,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
-from app.models import Plant, Organization
+from app.models import Plant, Organization, User
 from app.schemas.plant import PlantCreate, PlantResponse
+from app.api.deps import get_current_user, require_role, enforce_org_access
 
 
 router = APIRouter(
@@ -23,7 +24,9 @@ router = APIRouter(
 def create_plant(
     plant: PlantCreate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "engineer")),
 ):
+    enforce_org_access(current_user, plant.org_id)
     organization = db.get(Organization, plant.org_id)
 
     if organization is None:
@@ -60,9 +63,12 @@ def create_plant(
 )
 def get_plants(
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     result = db.execute(
-        select(Plant).order_by(Plant.created_at.desc())
+        select(Plant)
+        .where(Plant.org_id == current_user.org_id)
+        .order_by(Plant.created_at.desc())
     )
 
     return result.scalars().all()
@@ -75,6 +81,7 @@ def get_plants(
 def get_plant(
     plant_id: UUID,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     plant = db.get(Plant, plant_id)
 
@@ -83,5 +90,7 @@ def get_plant(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Plant not found",
         )
+
+    enforce_org_access(current_user, plant.org_id)
 
     return plant

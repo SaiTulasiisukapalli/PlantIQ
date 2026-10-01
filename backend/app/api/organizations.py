@@ -5,8 +5,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
-from app.models import Organization
+from app.models import Organization, User
 from app.schemas.organization import OrganizationCreate, OrganizationResponse
+from app.api.deps import get_current_user, require_role, enforce_org_access
 
 
 router = APIRouter(
@@ -23,6 +24,7 @@ router = APIRouter(
 def create_organization(
     organization: OrganizationCreate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("admin")),
 ):
     new_organization = Organization(
         name=organization.name,
@@ -41,9 +43,12 @@ def create_organization(
 )
 def get_organizations(
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     result = db.execute(
-        select(Organization).order_by(Organization.created_at.desc())
+        select(Organization)
+        .where(Organization.id == current_user.org_id)
+        .order_by(Organization.created_at.desc())
     )
 
     return result.scalars().all()
@@ -56,7 +61,10 @@ def get_organizations(
 def get_organization(
     organization_id: UUID,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
+    enforce_org_access(current_user, organization_id)
+
     organization = db.get(Organization, organization_id)
 
     if organization is None:

@@ -5,8 +5,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
-from app.models import Asset, CanonicalSignal, Channel
+from app.models import Asset, CanonicalSignal, Channel, Plant, User
 from app.schemas.channel import ChannelCreate, ChannelResponse
+from app.api.deps import get_current_user, require_role, enforce_org_access
 
 
 router = APIRouter(
@@ -23,6 +24,7 @@ router = APIRouter(
 def create_channel(
     channel: ChannelCreate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "engineer")),
 ):
     asset = db.get(Asset, channel.asset_id)
 
@@ -31,6 +33,8 @@ def create_channel(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Asset not found",
         )
+
+    enforce_org_access(current_user, asset.plant.org_id)
 
     canonical_signal = db.get(
         CanonicalSignal,
@@ -80,9 +84,14 @@ def create_channel(
 )
 def get_channels(
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     result = db.execute(
-        select(Channel).order_by(Channel.source_name)
+        select(Channel)
+        .join(Asset, Channel.asset_id == Asset.id)
+        .join(Plant, Asset.plant_id == Plant.id)
+        .where(Plant.org_id == current_user.org_id)
+        .order_by(Channel.source_name)
     )
 
     return result.scalars().all()
@@ -95,6 +104,7 @@ def get_channels(
 def get_channel(
     channel_id: UUID,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     channel = db.get(Channel, channel_id)
 
@@ -103,5 +113,7 @@ def get_channel(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Channel not found",
         )
+
+    enforce_org_access(current_user, channel.asset.plant.org_id)
 
     return channel

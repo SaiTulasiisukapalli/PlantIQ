@@ -12,3 +12,13 @@ class ReadingSummaryResponse(BaseModel):
     average_value: float | None
     minimum_value: float | None
     maximum_value: float | None
+
+
+class QCStatsResponse(BaseModel):
+    total_readings: int
+    active_channels: int
+    cadence_integrity: str
+    ingestion_quality: float
+    duplicates_count: int
+    out_of_bounds_count: int
+    hypertable_active: bool

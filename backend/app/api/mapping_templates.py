@@ -5,11 +5,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
-from app.models import MappingTemplate, Organization
+from app.models import MappingTemplate, Organization, User
 from app.schemas.mapping_template import (
     MappingTemplateCreate,
     MappingTemplateResponse,
 )
+from app.api.deps import get_current_user, require_role, enforce_org_access
 
 
 router = APIRouter(
@@ -26,7 +27,9 @@ router = APIRouter(
 def create_mapping_template(
     template: MappingTemplateCreate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "engineer")),
 ):
+    enforce_org_access(current_user, template.org_id)
     organization = db.get(Organization, template.org_id)
 
     if organization is None:
@@ -70,16 +73,17 @@ def create_mapping_template(
 def get_mapping_templates(
     org_id: UUID | None = None,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    query = select(MappingTemplate)
-
+    target_org_id = current_user.org_id
     if org_id is not None:
-        query = query.where(
-            MappingTemplate.org_id == org_id
-        )
+        enforce_org_access(current_user, org_id)
+        target_org_id = org_id
 
-    query = query.order_by(
-        MappingTemplate.created_at.desc()
+    query = (
+        select(MappingTemplate)
+        .where(MappingTemplate.org_id == target_org_id)
+        .order_by(MappingTemplate.created_at.desc())
     )
 
     result = db.execute(query)
@@ -94,6 +98,7 @@ def get_mapping_templates(
 def get_mapping_template(
     template_id: UUID,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     template = db.get(
         MappingTemplate,
@@ -105,5 +110,7 @@ def get_mapping_template(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Mapping template not found",
         )
+
+    enforce_org_access(current_user, template.org_id)
 
     return template

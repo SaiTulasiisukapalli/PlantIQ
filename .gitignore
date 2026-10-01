@@ -41,3 +41,9 @@ htmlcov/
 *.db
 *.sqlite
 *.sqlite3
+
+# PlantIQ local uploaded/generated files
+backend/uploads/
+uploads/
+backend_backup_sprint1/
+scratch/

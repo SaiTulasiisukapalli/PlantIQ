@@ -5,8 +5,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
-from app.models import Asset, Plant
+from app.models import Asset, Plant, User
 from app.schemas.asset import AssetCreate, AssetResponse
+from app.api.deps import get_current_user, require_role, enforce_org_access
 
 
 router = APIRouter(
@@ -23,6 +24,7 @@ router = APIRouter(
 def create_asset(
     asset: AssetCreate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "engineer")),
 ):
     plant = db.get(Plant, asset.plant_id)
 
@@ -31,6 +33,8 @@ def create_asset(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Plant not found",
         )
+
+    enforce_org_access(current_user, plant.org_id)
 
     if asset.parent_id is not None:
         parent_asset = db.get(Asset, asset.parent_id)
@@ -71,9 +75,13 @@ def create_asset(
 )
 def get_assets(
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     result = db.execute(
-        select(Asset).order_by(Asset.name)
+        select(Asset)
+        .join(Plant, Asset.plant_id == Plant.id)
+        .where(Plant.org_id == current_user.org_id)
+        .order_by(Asset.name)
     )
 
     return result.scalars().all()
@@ -86,6 +94,7 @@ def get_assets(
 def get_asset(
     asset_id: UUID,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     asset = db.get(Asset, asset_id)
 
@@ -94,5 +103,7 @@ def get_asset(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Asset not found",
         )
+
+    enforce_org_access(current_user, asset.plant.org_id)
 
     return asset
