@@ -63,11 +63,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, onSelectTab }) => {
             >
               <Icon className={`w-4 h-4 ${isActive ? 'text-white' : 'text-slate-500'}`} />
               <span>{item.label}</span>
-              {item.id === 'ingestion' && (
-                <span className="ml-auto text-[9px] font-mono font-bold px-1.5 py-0.5 bg-sky-100 text-sky-800 rounded">
-                  NEW
-                </span>
-              )}
             </button>
           );
         })}

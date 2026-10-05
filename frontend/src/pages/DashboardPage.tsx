@@ -50,9 +50,11 @@ export const DashboardPage: React.FC<{ onNavigateTab?: (tab: string) => void }> 
 
           if (acAgg && acAgg.length > 0) {
             const mapped: ChartPoint[] = acAgg.map((item, idx) => {
-              const timeFormatted = new Date(item.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+              const dateObj = new Date(item.start);
+              const timeFormatted = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
               const dcVal = dcAgg[idx]?.average_value || (item.average_value !== null ? item.average_value * 1.05 : 0);
               return {
+                timestamp: item.start,
                 time: timeFormatted,
                 acPower: item.average_value !== null ? parseFloat((item.average_value / 1000).toFixed(2)) : 0,
                 dcPower: dcVal !== null ? parseFloat((dcVal / 1000).toFixed(2)) : 0,

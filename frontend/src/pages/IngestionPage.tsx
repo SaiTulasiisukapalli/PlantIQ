@@ -28,6 +28,7 @@ export const IngestionPage: React.FC = () => {
   const [selectedFileName, setSelectedFileName] = useState<string>('No file selected');
   const [currentFileRecord, setCurrentFileRecord] = useState<FileRecord | null>(null);
   const [profileData, setProfileData] = useState<AIProfileResponse | null>(null);
+  const [customMappings, setCustomMappings] = useState<Record<string, string>>({});
 
   const [files, setFiles] = useState<FileRecord[]>([]);
   const [filesLoading, setFilesLoading] = useState<boolean>(false);
@@ -42,6 +43,18 @@ export const IngestionPage: React.FC = () => {
   const [ingestStatusText, setIngestStatusText] = useState<string>('Ingesting SCADA telemetry...');
   const [resetting, setResetting] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const resetIngestionPipeline = useCallback(() => {
+    setActiveStep(1);
+    setSelectedFileName('No file selected');
+    setCurrentFileRecord(null);
+    setProfileData(null);
+    setCustomMappings({});
+    setIngestProgress(0);
+    setIngestStatusText('Ingesting SCADA telemetry...');
+    setIngesting(false);
+    setErrorMessage(null);
+  }, []);
 
   const formatBytes = (bytes: number | null | undefined): string => {
     if (!bytes || bytes === 0) return '0 B';
@@ -97,11 +110,7 @@ export const IngestionPage: React.FC = () => {
       return;
     }
 
-    loadFiles().then((loadedFiles) => {
-      if (loadedFiles.length > 0 && !currentFileRecord) {
-        selectAndProfileFile(loadedFiles[0]);
-      }
-    });
+    loadFiles();
 
     getIngestionJobs()
       .then((jobsRes) => setJobs(jobsRes))
@@ -128,10 +137,7 @@ export const IngestionPage: React.FC = () => {
     try {
       setResetting(true);
       await resetSCADAData();
-      setProfileData(null);
-      setSelectedFileName('No file selected');
-      setCurrentFileRecord(null);
-      setActiveStep(1);
+      resetIngestionPipeline();
       await loadFiles();
       alert('SCADA database reset completed! Database is now empty and ready for fresh CSV demo upload.');
     } catch (err: any) {
@@ -145,6 +151,7 @@ export const IngestionPage: React.FC = () => {
     try {
       setErrorMessage(null);
       setIsUploading(true);
+      setActiveStep(1);
       setUploadProgress(null);
 
       const ext = browserFile.name.substring(browserFile.name.lastIndexOf('.')).toLowerCase();
@@ -161,9 +168,12 @@ export const IngestionPage: React.FC = () => {
       });
 
       setCurrentFileRecord(uploadedRecord);
+      setSelectedFileName(uploadedRecord.original_name || uploadedRecord.path);
       setIsUploading(false);
       setUploadProgress(null);
 
+      setActiveStep(2);
+      setLoadingProfile(true);
       await loadFiles();
       await selectAndProfileFile(uploadedRecord);
     } catch (err: any) {
@@ -185,18 +195,31 @@ export const IngestionPage: React.FC = () => {
     AC_POWER: { key: 'power_ac', type: 'kW' },
     DAILY_YIELD: { key: 'energy_ac_daily', type: 'kWh' },
     TOTAL_YIELD: { key: 'energy_ac_total', type: 'kWh' },
+    IRRADIANCE: { key: 'irradiance', type: 'W/m²' },
+    IRRADIATION: { key: 'irradiation', type: 'W/m²' },
+    AMBIENT_TEMPERATURE: { key: 'ambient_temperature', type: '°C' },
+    MODULE_TEMPERATURE: { key: 'module_temperature', type: '°C' },
+  };
+
+  const handleUpdateMapping = (rawColumn: string, newMappedKey: string) => {
+    setCustomMappings((prev) => ({
+      ...prev,
+      [rawColumn]: newMappedKey,
+    }));
   };
 
   const mappingItems: ColumnMappingItem[] = profileData
     ? profileData.columns.map((col) => {
+        const userCustomKey = customMappings[col.name];
         const suggestion = profileData.mapping_suggestions.find((s) => s.raw_column === col.name);
         const canon = canonicalLabels[col.name] || {
           key: suggestion?.canonical_key || col.name.toLowerCase(),
           type: col.data_type || 'ISO 8601',
         };
+        const finalKey = userCustomKey || canon.key;
         return {
           rawColumn: col.name,
-          mappedKey: canon.key,
+          mappedKey: finalKey,
           targetType: canon.type,
           confidence: suggestion ? Math.round(suggestion.confidence * 100) : 100,
           sampleData: col.sample_values ? String(col.sample_values[0]) : undefined,
@@ -267,9 +290,10 @@ export const IngestionPage: React.FC = () => {
           setIngestProgress(1.0);
           window.dispatchEvent(new CustomEvent('plantiq:ingested'));
           const count = initialRes.qc_summary?.readings_inserted || initialRes.rows_total || profileData?.row_count;
-          alert(`Ingestion job completed! ${count} telemetry readings inserted into database.`);
-          setIngesting(false);
           await loadFiles();
+          setIngesting(false);
+          alert(`Ingestion job completed! ${count} telemetry readings inserted into database.`);
+          resetIngestionPipeline();
           return;
         }
 
@@ -285,17 +309,25 @@ export const IngestionPage: React.FC = () => {
             const total = summary.rows_total || profileData?.row_count || 68778;
 
             setIngestProgress(progressVal);
-            setIngestStatusText(`Processing SCADA rows: ${processed.toLocaleString()} / ${total.toLocaleString()} (${Math.round(progressVal * 100)}%)...`);
+
+            if (status === 'qc' || progressVal >= 0.60) {
+              setActiveStep(5);
+              setIngestStatusText(`Executing Quality Control (QC) validation bitmasks... (${Math.round(progressVal * 100)}%)`);
+            } else {
+              setActiveStep(4);
+              setIngestStatusText(`Processing SCADA rows: ${processed.toLocaleString()} / ${total.toLocaleString()} (${Math.round(progressVal * 100)}%)...`);
+            }
 
             if (status === 'completed' || status === 'done') {
               clearInterval(pollInterval);
-              setIngesting(false);
               setActiveStep(6);
               setIngestProgress(1.0);
               window.dispatchEvent(new CustomEvent('plantiq:ingested'));
               const inserted = summary.readings_inserted || summary.rows_inserted || processed;
-              alert(`Ingestion job completed successfully! ${inserted.toLocaleString()} telemetry readings processed and inserted into database.`);
               await loadFiles();
+              setIngesting(false);
+              alert(`Ingestion job completed successfully! ${inserted.toLocaleString()} telemetry readings processed and inserted into database.`);
+              resetIngestionPipeline();
             } else if (status === 'failed') {
               clearInterval(pollInterval);
               setIngesting(false);
@@ -459,6 +491,7 @@ export const IngestionPage: React.FC = () => {
             colCount={profileData?.column_count || 0}
             mappings={mappingItems}
             onConfirmAll={handleExecuteIngest}
+            onUpdateMapping={handleUpdateMapping}
           />
         </div>
       </div>
